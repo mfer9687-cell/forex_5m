@@ -27,35 +27,48 @@ def add_ichimoku(df):
     span_b = ((h.rolling(52).max() + l.rolling(52).min()) / 2).shift(26)
     both = pd.concat([span_a, span_b], axis=1)
     df["cloud_bot"] = both.min(axis=1, skipna=False)
+    df["cloud_top"] = both.max(axis=1, skipna=False)
     return df
 
 
-def check(name, df):
+def check(df):
     df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
     df.index = df.index.tz_convert("UTC")
     now = pd.Timestamp.now(tz="UTC")
     df = df[df.index + pd.Timedelta(minutes=TF_MIN) <= now]
     if len(df) < 80:
-        return None
+        return []
     df = add_ichimoku(df)
     c, p = df.iloc[-1], df.iloc[-2]
     if now - df.index[-1] > pd.Timedelta(minutes=TF_MIN * 2 + 5):
-        return None
+        return []
     if pd.isna(c["cloud_bot"]) or pd.isna(p["tenkan"]) or pd.isna(p["kijun"]):
-        return None
+        return []
 
+    out = []
+    t = df.index[-1]
+
+    # خرید
     cross_up = p["tenkan"] <= p["kijun"] and c["tenkan"] > c["kijun"]
     under_cloud = max(c["tenkan"], c["kijun"]) < c["cloud_bot"]
     green = c["Close"] > c["Open"]
     above_tenkan = c["Close"] > c["tenkan"]
-    risk = c["Close"] - c["Low"]
-
-    if cross_up and under_cloud and green and above_tenkan and risk > 0:
+    risk_buy = c["Close"] - c["Low"]
+    if cross_up and under_cloud and green and above_tenkan and risk_buy > 0:
         entry = float(c["Close"])
-        sl = float(c["Low"])
-        tp = entry + RR * risk
-        return entry, sl, tp, df.index[-1]
-    return None
+        out.append(("buy", entry, float(c["Low"]), entry + RR * risk_buy, t))
+
+    # فروش
+    cross_down = p["tenkan"] >= p["kijun"] and c["tenkan"] < c["kijun"]
+    over_cloud = min(c["tenkan"], c["kijun"]) > c["cloud_top"]
+    red = c["Close"] < c["Open"]
+    below_tenkan = c["Close"] < c["tenkan"]
+    risk_sell = c["High"] - c["Close"]
+    if cross_down and over_cloud and red and below_tenkan and risk_sell > 0:
+        entry = float(c["Close"])
+        out.append(("sell", entry, float(c["High"]), entry - RR * risk_sell, t))
+
+    return out
 
 
 def send(text):
@@ -83,26 +96,29 @@ def main():
     )
     for name, ticker in SYMBOLS.items():
         try:
-            res = check(name, data[ticker])
+            signals = check(data[ticker])
         except Exception as e:
             print(name, "error:", e)
             continue
-        if not res:
+        if not signals:
             print(name, "no signal")
             continue
-        entry, sl, tp, t = res
-        msg = (
-            f"🟢 سیگنال خرید\n"
-            f"{name}\n"
-            f"تایم‌فریم: 5m\n"
-            f"ورود: {entry:.5g}\n"
-            f"حد ضرر: {sl:.5g}\n"
-            f"حد سود: {tp:.5g}\n"
-            f"ریسک به ریوارد: 1:{RR}\n"
-            f"کندل: {t:%Y-%m-%d %H:%M} UTC"
-        )
-        send(msg)
-        print(name, "SIGNAL")
+        for side, entry, sl, tp, t in signals:
+            if side == "buy":
+                title = "🟢 سیگنال خرید"
+            else:
+                title = "🔴 سیگنال فروش"
+            send(
+                f"{title}\n"
+                f"{name}\n"
+                f"تایم‌فریم: {TF_MIN}m\n"
+                f"ورود: {entry:.5g}\n"
+                f"حد ضرر: {sl:.5g}\n"
+                f"حد سود: {tp:.5g}\n"
+                f"ریسک به ریوارد: 1:{RR}\n"
+                f"کندل: {t:%Y-%m-%d %H:%M} UTC"
+            )
+            print(name, side.upper(), "SIGNAL")
 
 
 if __name__ == "__main__":
